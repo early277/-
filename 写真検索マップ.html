@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>写真検索マップ</title>
+
+  <!-- セキュリティ強化: CSP / Permissions-Policy / Referrer -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' blob: data: https://cyberjapandata.gsi.go.jp https://unpkg.com; style-src 'self' https://unpkg.com 'unsafe-inline'; script-src 'self' https://unpkg.com 'unsafe-inline'; worker-src 'self' blob:; connect-src 'self' https://cyberjapandata.gsi.go.jp; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; upgrade-insecure-requests">
+  <meta http-equiv="Permissions-Policy" content="geolocation=(), microphone=(), camera=(), interest-cohort=()">
+  <meta name="referrer" content="no-referrer">
+
+  <!-- ライブラリ（CDN利用。SRIは後付け可） -->
+  <link rel="preconnect" href="https://unpkg.com"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="anonymous"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" crossorigin="anonymous"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" crossorigin="anonymous"/>
+  <link rel="stylesheet" href="https://unpkg.com/nouislider@15.7.0/dist/nouislider.min.css" crossorigin="anonymous"/>
+  <style>
+    :root { --thumb-size: 72px; }
+    html, body {height: auto; min-height: 100%; margin: 0;}
+    body { overflow: auto; }
+    #app {display: grid; grid-template-rows: auto 1fr auto; height: auto;}
+
+    /* ヘッダー + 上部コントロール */
+    header {padding:.5rem .75rem; border-bottom:1px solid #ddd;}
+    .topbar {display:grid; grid-template-columns: 1fr auto; gap:.75rem; align-items:start;}
+    .fileRow {display:flex; gap:.5rem; align-items:center;}
+    .filters {display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; margin-top:.5rem;}
+    .filters .col {display:flex; gap:.35rem; align-items:center;}
+    select[multiple] {min-width:200px; min-height:4.8rem;}
+    .dateControls {display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; margin:.5rem 0;}
+    .dateControls input[type="date"] {padding:.2rem .3rem;}
+    #slider {margin:.25rem 0 .5rem 0;}
+    .stats {font-size:.9rem; color:#444;}
+    .btn {appearance:none; border:1px solid #999; background:#fff; padding:.35rem .6rem; border-radius:8px; cursor:pointer;}
+    .btn:hover {background:#f5f5f5;}
+
+    /* メイン: マップは可変高さ */
+    #main {padding:0;}
+    #map {height: 60vh; min-height: 300px; width: 100%;}
+
+    /* 下部: 選択リストパネル */
+    #bottomPanel {border-top:1px solid #ddd; background:#fff;}
+    #selHeader {display:flex; align-items:center; justify-content:space-between; gap:.5rem; padding:.5rem .75rem; border-bottom:1px solid #eee;}
+    #thumbControls {display:flex; align-items:center; gap:.5rem; padding:.4rem .75rem; border-bottom:1px solid #f0f0f0;}
+    #thumbControls label {font-size:.86rem; color:#444;}
+    #thumbGrid {max-height: 40vh; overflow:auto; overscroll-behavior:contain; padding:.5rem; display:grid; gap:.5rem; grid-template-columns: repeat(auto-fill, minmax(var(--thumb-size), 1fr));}
+    .thumbBtn {position:relative; width:var(--thumb-size); height:var(--thumb-size); border:1px solid #e5e5e5; border-radius:8px; overflow:hidden; background:#fff; cursor:pointer;}
+    .thumbBtn img {width:100%; height:100%; object-fit:cover; display:block;}
+    .thumbBtn .badge {position:absolute; left:4px; top:4px; background:#0008; color:#fff; font-size:.72rem; padding:2px 4px; border-radius:4px;}
+    #detailPanel {border-top:1px solid #eee; padding:.5rem .75rem; max-height: 40vh; overflow:auto;}
+    #detailPanel.hidden {display:none;}
+    #detailPanel .title {font-weight:600; margin-bottom:.25rem;}
+    #detailPanel .meta {font-size:.86rem; color:#444; margin-bottom:.4rem;}
+    #detailPanel img {max-width:100%; max-height:240px; display:block; border-radius:8px;}
+    #detailPanel .btnRow {display:flex; gap:.5rem; margin-top:.4rem;}
+
+    .hidden {display:none;}
+    .popup-img {max-width:240px; max-height:180px; display:block;}
+    .muted {opacity:.6}
+  </style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="topbar">
+      <div>
+        <div class="fileRow">
+          <div id="dropzone">クリックで写真を追加（JPEG/HEIC/PNG）。</div>
+          <label class="btn" for="picker">ファイル/フォルダを選択</label>
+          <input id="picker" class="hidden" type="file" multiple webkitdirectory directory 
+                 accept=".jpg,.jpeg,.png,.heic,.heif,image/jpeg,image/png,image/heic,image/heif" />
+          <button id="fitBtn" class="btn">全体表示</button>
+          <button id="clearBtn" class="btn">消去</button>
+        </div>
+        <div class="filters">
+          <div class="col">
+            <label for="artistSel">撮影者</label>
+            <select id="artistSel" multiple title="未選択=すべて"></select>
+          </div>
+          <div class="col">
+            <label for="modelSel">機種</label>
+            <select id="modelSel" multiple title="未選択=すべて"></select>
+          </div>
+          <button id="resetFilterBtn" class="btn">フィルタ解除</button>
+        </div>
+        <div class="dateControls">
+          <input type="date" id="startInput" aria-label="開始日">
+          <span>～</span>
+          <input type="date" id="endInput" aria-label="終了日">
+          <button class="btn" data-range="today">今日</button>
+          <button class="btn" data-range="7d">7日</button>
+          <button class="btn" data-range="30d">30日</button>
+          <button class="btn" data-range="ytd">今年</button>
+          <button class="btn" data-range="all">全期間</button>
+        </div>
+        <div id="slider"></div>
+        <div class="stats">
+          <span id="dateLabel">期間: -</span>
+          <span style="margin-left:1rem">読込: <b id="countLoaded">0</b></span>
+          <span style="margin-left:0.5rem">プロット: <b id="countPlotted">0</b></span>
+          <span style="margin-left:0.5rem">表示中: <b id="countVisible">0</b></span>
+          <span style="margin-left:0.5rem">除外(GPS/日付なし): <b id="countIgnored">0</b></span>
+          <span style="margin-left:0.5rem">補完: <b id="countImputed">0</b></span>
+        </div>
+      </div>
+      <div></div>
+    </div>
+  </header>
+
+  <div id="main">
+    <div id="map"></div>
+  </div>
+
+  <section id="bottomPanel">
+    <div id="selHeader">
+      <div>
+        <div style="font-weight:600">選択中の写真 <span class="muted">(<b id="countSelected">0</b>)</span></div>
+        <div class="muted" style="font-size:.86rem">左ドラッグ=矩形選択／ミドル=地図をつかむ／右=全解除</div>
+      </div>
+      <div class="selBtns">
+        <button id="clearSelectionBtn" class="btn">全解除</button>
+        <button id="downloadBtn" class="btn" disabled>ZIP</button>
+      </div>
+    </div>
+    <div id="thumbControls">
+      <label>サムネ:</label>
+      <input id="thumbSize" type="range" min="40" max="128" step="4" value="72"/>
+    </div>
+    <div id="thumbGrid"></div>
+    <div id="detailPanel" class="hidden">
+      <div class="title" id="detailTitle"></div>
+      <div class="meta" id="detailMeta"></div>
+      <img id="detailImg" alt="preview">
+      <div class="btnRow">
+        <button id="detailShowBtn" class="btn">地図で表示</button>
+        <button id="detailDownloadBtn" class="btn">この写真を保存</button>
+        <button id="detailCloseBtn" class="btn">閉じる</button>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/nouislider@15.7.0/dist/nouislider.min.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/jszip@3.10.1/dist/jszip.min.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/exifr/dist/full.umd.js" crossorigin="anonymous"></script>
+<script>
+(function(){
+  // --- Constants & Limits ---
+  const DAY = 24*60*60*1000;
+  const MAX_FILES = 5000;               // 受入ファイル数上限
+  const MAX_FILE_BYTES = 50*1024*1024;  // 1ファイル上限 50MB
+  const CONCURRENCY = 4;                // 並列度（安全側）
+
+  // --- Map setup: 地理院タイル ---
+  const gsiAttr = '<a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank" rel="noopener noreferrer">地理院タイル</a>';
+  const gsiStd = L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', { maxZoom: 18, attribution: gsiAttr });
+  const gsiPale = L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png', { maxZoom: 18, attribution: gsiAttr });
+  const gsiPhoto = L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg', { maxZoom: 18, attribution: gsiAttr });
+  const map = L.map('map', {layers:[gsiStd]}).setView([35.681, 139.767], 5);
+  L.control.layers({"標準": gsiStd, "淡色": gsiPale, "写真": gsiPhoto}, null, {collapsed:true}).addTo(map);
+
+  const cluster = L.markerClusterGroup();
+  map.addLayer(cluster);
+
+  // --- State ---
+  const photos = []; // {file, url, name, date, ts, day, lat, lng, artist, model, marker, imputed}
+  const markerToPhoto = new Map();
+  let minDay = Infinity, maxDay = -Infinity;
+  let ignored = 0, imputedCount = 0;
+  const artistSet = new Set();
+  const modelSet = new Set();
+  const withGpsByModel = new Map(); // model -> [{ts, lat, lng}...]
+  const pendingImpute = []; // missing gps
+
+  // --- Selection ---
+  const selectedMarkers = new Set();
+  const selectionBoxLayer = L.featureGroup().addTo(map);
+  let draggingRect = false, dragStartLL = null, dragRect = null;
+  let panMode = false, lastClient = null;
+  let detailPhoto = null;
+
+  // --- UI refs ---
+  const headerEl = document.querySelector('header');
+  const dropzone = document.getElementById('dropzone');
+  const picker = document.getElementById('picker');
+  const sliderEl = document.getElementById('slider');
+  const startInput = document.getElementById('startInput');
+  const endInput = document.getElementById('endInput');
+  const dateLabel = document.getElementById('dateLabel');
+  const countLoaded = document.getElementById('countLoaded');
+  const countPlotted = document.getElementById('countPlotted');
+  const countVisible = document.getElementById('countVisible');
+  const countIgnored = document.getElementById('countIgnored');
+  const countImputed = document.getElementById('countImputed');
+  const countSelected = document.getElementById('countSelected');
+  const fitBtn = document.getElementById('fitBtn');
+  const clearBtn = document.getElementById('clearBtn');
+  const artistSel = document.getElementById('artistSel');
+  const modelSel = document.getElementById('modelSel');
+  const resetFilterBtn = document.getElementById('resetFilterBtn');
+  const clearSelectionBtn = document.getElementById('clearSelectionBtn');
+  const downloadBtn = document.getElementById('downloadBtn');
+  const thumbGrid = document.getElementById('thumbGrid');
+  const thumbSize = document.getElementById('thumbSize');
+  const detailPanel = document.getElementById('detailPanel');
+  const detailTitle = document.getElementById('detailTitle');
+  const detailMeta = document.getElementById('detailMeta');
+  const detailImg = document.getElementById('detailImg');
+  const detailShowBtn = document.getElementById('detailShowBtn');
+  const detailDownloadBtn = document.getElementById('detailDownloadBtn');
+  const detailCloseBtn = document.getElementById('detailCloseBtn');
+
+  // --- Helpers ---
+  const fmtDate = d => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth()+1).padStart(2,'0');
+    const dd = String(d.getDate()).padStart(2,'0');
+    return `${y}-${m}-${dd}`;
+  };
+  const escapeHtml = s => String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#39;');
+  const dayFromDateStr = (str)=>{ if(!str) return null; const d = new Date(str+"T00:00:00"); if (isNaN(d)) return null; return Math.floor(d.getTime()/DAY); };
+  const dateStrFromDay = (day)=> fmtDate(new Date(day*DAY));
+
+  function updateStats(){
+    countLoaded.textContent = photos.length;
+    countPlotted.textContent = cluster.getLayers().length;
+    countIgnored.textContent = ignored;
+    countImputed.textContent = imputedCount;
+    countVisible.textContent = cluster.getLayers().length;
+    countSelected.textContent = selectedMarkers.size;
+    downloadBtn.disabled = selectedMarkers.size === 0;
+  }
+
+  function fitBoundsIfAny(){ if (cluster.getLayers().length > 0) map.fitBounds(cluster.getBounds().pad(0.2)); }
+
+  // --- Slider (day-index) ---
+  let slider;
+  function ensureSlider(){
+    if (!isFinite(minDay) || !isFinite(maxDay) || minDay>maxDay) return;
+    let lo = minDay, hi = maxDay;
+    if (lo === hi) { lo -= 1; hi += 1; }
+    const start = [lo, hi];
+    if (!slider){
+      slider = noUiSlider.create(sliderEl, { start, connect:true, range:{min:lo, max:hi}, step:1 });
+      slider.on('update', ()=>{
+        const [a,b] = slider.get().map(v=>Number(v));
+        dateLabel.textContent = `期間: ${dateStrFromDay(a)} ～ ${dateStrFromDay(b)}`;
+        startInput.value = dateStrFromDay(a);
+        endInput.value = dateStrFromDay(b);
+      });
+      slider.on('change', ()=>{ rebuild(); refreshSelection(); });
+    } else {
+      slider.updateOptions({start, range:{min:lo, max:hi}}, true);
+    }
+    dateLabel.textContent = `期間: ${dateStrFromDay(lo)} ～ ${dateStrFromDay(hi)}`;
+    startInput.value = dateStrFromDay(lo);
+    endInput.value = dateStrFromDay(hi);
+  }
+
+  function setRange(lo, hi){
+    if (!slider) return;
+    lo = Math.max(minDay, Math.min(lo, maxDay));
+    hi = Math.max(minDay, Math.min(hi, maxDay));
+    if (lo>hi) [lo,hi] = [hi,lo];
+    slider.set([lo, hi]);
+    rebuild();
+    refreshSelection();
+  }
+
+  // Date inputs
+  startInput.addEventListener('change', ()=>{ const lo = dayFromDateStr(startInput.value); const hi = dayFromDateStr(endInput.value); if (lo!=null && hi!=null) setRange(lo, hi); });
+  endInput.addEventListener('change',   ()=>{ const lo = dayFromDateStr(startInput.value); const hi = dayFromDateStr(endInput.value); if (lo!=null && hi!=null) setRange(lo, hi); });
+  document.querySelectorAll('.dateControls .btn[data-range]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const nowDay = Math.floor(Date.now()/DAY);
+      let lo, hi;
+      switch(btn.dataset.range){
+        case 'today': lo = nowDay; hi = nowDay; break;
+        case '7d': hi = nowDay; lo = hi-6; break;
+        case '30d': hi = nowDay; lo = hi-29; break;
+        case 'ytd': { const d = new Date(); const jan1 = new Date(d.getFullYear(),0,1); lo = Math.floor(jan1.getTime()/DAY); hi = nowDay; break; }
+        default: lo = minDay; hi = maxDay; break;
+      }
+      setRange(lo, hi);
+    });
+  });
+
+  function selectedValues(sel){ return Array.from(sel.selectedOptions).map(o=>o.value).filter(v=>v!==''); }
+  function populateSelect(sel, values){
+    const cur = new Set(Array.from(sel.options).map(o=>o.value));
+    const toAdd = [...values].filter(v=>!cur.has(v));
+    if (!toAdd.length) return;
+    const frag = document.createDocumentFragment();
+    toAdd.sort((a,b)=> a.localeCompare(b, 'ja'));
+    for (const v of toAdd){ const opt = document.createElement('option'); opt.value=v; opt.textContent=v||'(未設定)'; frag.appendChild(opt); }
+    sel.appendChild(frag);
+  }
+
+  // --- Core filter + render ---
+  function rebuild(){
+    const range = slider ? slider.get().map(v=>Number(v)) : [minDay, maxDay];
+    const lo = range[0], hi = range[1];
+    const arts = selectedValues(artistSel);
+    const mods = selectedValues(modelSel);
+
+    cluster.clearLayers();
+    const inRange = [];
+    for (const p of photos){
+      if (p.day < lo || p.day > hi) continue;
+      if (arts.length && !arts.includes(p.artist)) continue;
+      if (mods.length && !mods.includes(p.model)) continue;
+      inRange.push(p.marker);
+    }
+    cluster.addLayers(inRange);
+    countVisible.textContent = inRange.length;
+  }
+
+  // --- Selection grid UI ---
+  function renderThumbGrid(){
+    thumbGrid.style.setProperty('--thumb-size', thumbSize.value + 'px');
+    thumbGrid.innerHTML = '';
+    for (const m of selectedMarkers){
+      const p = markerToPhoto.get(m); if (!p) continue;
+      const btn = document.createElement('button'); btn.className='thumbBtn'; btn.title=p.name;
+      const img = document.createElement('img'); img.src=p.url; img.alt=p.name; btn.appendChild(img);
+      if (p.imputed){ const b=document.createElement('div'); b.className='badge'; b.textContent='補完'; btn.appendChild(b); }
+      btn.onclick = ()=> showDetail(p);
+      thumbGrid.appendChild(btn);
+    }
+  }
+
+  function showDetail(p){
+    detailPhoto = p;
+    detailTitle.textContent = p.name + (p.imputed?' (補完)':'');
+    detailMeta.textContent = `${fmtDate(p.date)} / ${p.lat.toFixed(6)}, ${p.lng.toFixed(6)} / 撮影者:${p.artist||'-'} / 機種:${p.model||'-'}`;
+    detailImg.src = p.url; detailImg.alt = p.name;
+    detailPanel.classList.remove('hidden');
+  }
+  function hideDetail(){ detailPanel.classList.add('hidden'); detailPhoto=null; }
+
+  detailShowBtn.addEventListener('click', ()=>{ if (!detailPhoto) return; map.setView([detailPhoto.lat, detailPhoto.lng], Math.max(map.getZoom(), 14)); detailPhoto.marker.openPopup(); });
+  detailDownloadBtn.addEventListener('click', async ()=>{ if (!detailPhoto) return; const a=document.createElement('a'); a.href=detailPhoto.url; a.download=detailPhoto.name; document.body.appendChild(a); a.click(); a.remove(); });
+  detailCloseBtn.addEventListener('click', hideDetail);
+
+  function refreshSelection(){
+    const visible = new Set(cluster.getLayers());
+    for (const m of Array.from(selectedMarkers)) if (!visible.has(m)) selectedMarkers.delete(m);
+    updateStats();
+    renderThumbGrid();
+    if (detailPhoto && !selectedMarkers.has(detailPhoto.marker)) hideDetail();
+  }
+
+  // --- Mouse handling: left=rect, middle=pan, right=clear ---
+  map.on('contextmenu', (e)=>{ // right click => clear
+    selectedMarkers.clear(); updateStats(); renderThumbGrid(); hideDetail(); L.DomEvent.preventDefault(e);
+  });
+
+  map.on('mousedown', (e)=>{
+    const btn = e.originalEvent.button; // 0:left 1:middle 2:right
+    if (btn === 1){ // middle => custom pan
+      panMode = true; lastClient = {x:e.originalEvent.clientX, y:e.originalEvent.clientY};
+      L.DomEvent.stop(e);
+    } else if (btn === 0){ // left => rectangle select
+      draggingRect = true; dragStartLL = e.latlng; 
+      if (dragRect){ selectionBoxLayer.removeLayer(dragRect); dragRect=null; }
+      dragRect = L.rectangle(L.latLngBounds(dragStartLL, dragStartLL), {weight:1, dashArray:'4,4'}).addTo(selectionBoxLayer);
+      // 防止: 地図内部のドラッグパンを抑制
+      map.dragging.disable();
+    }
+  });
+
+  map.on('mousemove', (e)=>{
+    if (panMode){
+      const dx = e.originalEvent.clientX - lastClient.x;
+      const dy = e.originalEvent.clientY - lastClient.y;
+      map.panBy([-dx, -dy], {animate:false});
+      lastClient = {x:e.originalEvent.clientX, y:e.originalEvent.clientY};
+    } else if (draggingRect && dragRect){
+      dragRect.setBounds(L.latLngBounds(dragStartLL, e.latlng));
+    }
+  });
+
+  map.on('mouseup', ()=>{
+    if (panMode){ panMode=false; return; }
+    if (!draggingRect) { map.dragging.enable(); return; }
+    draggingRect = false; map.dragging.enable();
+    if (!dragRect) return;
+    const bounds = dragRect.getBounds();
+    for (const m of cluster.getLayers()){
+      const ll = m.getLatLng(); if (bounds.contains(ll)) selectedMarkers.add(m);
+    }
+    selectionBoxLayer.removeLayer(dragRect); dragRect=null;
+    updateStats(); renderThumbGrid();
+  });
+
+  // --- Download selected as ZIP ---
+  function timestamp(){ const d=new Date(),p=n=>String(n).padStart(2,'0'); return `${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`; }
+  function uniqueNamer(){ const used=new Set(); return function(name){ const m=/^(.*?)(\.[^.]*?)?$/.exec(name); const base=m[1]||name, ext=m[2]||''; let n=base+ext, k=1; while(used.has(n)) n=`${base} (${k++})${ext}`; used.add(n); return n; }; }
+  downloadBtn.addEventListener('click', async ()=>{
+    if (selectedMarkers.size === 0) return;
+    const zip = new JSZip(); const nameOf = uniqueNamer(); const tasks = [];
+    for (const m of selectedMarkers){ const p = markerToPhoto.get(m); if (!p) continue; tasks.push((async()=>{ const buf=await p.file.arrayBuffer(); zip.file(nameOf(p.name), buf); })()); }
+    await Promise.allSettled(tasks);
+    const blob = await zip.generateAsync({type:'blob'});
+    const url = URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=`selected_photos_${timestamp()}.zip`; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url), 1000);
+  });
+
+  // --- File intake & DnD ---
+  function attachDnD(el){
+    ['dragenter','dragover'].forEach(ev => el.addEventListener(ev, e=>{ e.preventDefault(); e.dataTransfer.dropEffect='copy'; dropzone.classList.add('dragover'); }));
+    ['dragleave','drop'].forEach(ev => el.addEventListener(ev, e=>{ dropzone.classList.remove('dragover'); }));
+    el.addEventListener('drop', async e => {
+      e.preventDefault();
+      const dt = e.dataTransfer;
+      const items = dt && dt.items ? Array.from(dt.items) : [];
+      if (items.length && items[0].webkitGetAsEntry){
+        const files = [];
+        await Promise.all(items.map(async it => { const entry = it.webkitGetAsEntry(); if (entry) await walkEntry(entry, files); }));
+        await handleFiles(files);
+      } else if (dt && dt.files) {
+        await handleFiles(dt.files);
+      }
+    });
+  }
+  attachDnD(dropzone);
+  attachDnD(headerEl);
+  ['dragover','drop'].forEach(type => window.addEventListener(type, e=>{ e.preventDefault(); }));
+  dropzone.addEventListener('click', ()=> picker.click());
+
+  async function handleFiles(fileList){
+    const files0 = Array.from(fileList);
+    const filesFiltered = files0.filter(f => (
+      /(image\/(jpeg|jpg|heic|heif|png))/i.test(f.type) || /\.(jpe?g|png|heic|heif)$/i.test(f.name)
+    ) && (typeof f.size !== 'number' || f.size <= MAX_FILE_BYTES)).slice(0, MAX_FILES);
+
+    const total = filesFiltered.length; if (!total){ updateStats(); return; }
+
+    let idx = 0;
+    async function worker(){
+      while (idx < total){ const i = idx++; const f = filesFiltered[i]; try { await processFile(f); } catch(e){} }
+    }
+    const workers = Array.from({length: Math.min(CONCURRENCY, total)}, worker);
+    await Promise.allSettled(workers);
+
+    await imputeMissingGps();
+    ensureSlider(); rebuild(); fitBoundsIfAny(); refreshSelection(); updateStats();
+  }
+
+  async function processFile(file){
+    let exif; try { exif = await exifr.parse(file, {gps:true, exif:true, tiff:true}); } catch(e){}
+    const lat = exif?.latitude ?? exif?.GPSLatitude;
+    const lng = exif?.longitude ?? exif?.GPSLongitude;
+    const date = exif?.DateTimeOriginal || exif?.CreateDate || exif?.ModifyDate;
+    const artist = (exif?.Artist || '').toString();
+    const model  = (exif?.Model  || '').toString();
+    if (!(date instanceof Date)) { ignored++; countIgnored.textContent = ignored; return; }
+    const ts = date.getTime(); const day = Math.floor(ts / DAY);
+    if (typeof lat !== 'number' || typeof lng !== 'number'){
+      if (model) { pendingImpute.push({file, name:file.name, date, ts, day, artist, model}); if (artist) { artistSet.add(artist); populateSelect(artistSel, artistSet); } if (model)  { modelSet.add(model);   populateSelect(modelSel, modelSet);   } return; } else { ignored++; countIgnored.textContent = ignored; return; }
+    }
+    addPhoto({file, name:file.name, date, ts, day, lat, lng, artist, model, imputed:false});
+    if (model){ if (!withGpsByModel.has(model)) withGpsByModel.set(model, []); withGpsByModel.get(model).push({ts, lat, lng}); }
+  }
+
+  function addPhoto(p){
+    minDay = Math.min(minDay, p.day); maxDay = Math.max(maxDay, p.day);
+    if (p.artist) { artistSet.add(p.artist); populateSelect(artistSel, artistSet); }
+    if (p.model)  { modelSet.add(p.model);   populateSelect(modelSel, modelSet);   }
+    const url = URL.createObjectURL(p.file); p.url = url;
+    const marker = L.marker([p.lat, p.lng]);
+    const badge = p.imputed ? ' <span class="muted">(補完)</span>' : '';
+    const html = `
+      <div>
+        <div style=\"font-weight:600\">${escapeHtml(p.name)}${badge}</div>
+        <div>${fmtDate(p.date)} / ${p.lat.toFixed(6)}, ${p.lng.toFixed(6)}</div>
+        <div>撮影者: ${escapeHtml(p.artist || '-')}, 機種: ${escapeHtml(p.model || '-')}</div>
+        <div style=\"margin-top:.3rem\"><img class=\"popup-img\" src=\"${p.url}\" alt=\"${escapeHtml(p.name)}\"></div>
+      </div>`;
+    marker.bindPopup(html);
+    p.marker = marker; photos.push(p); markerToPhoto.set(marker, p); cluster.addLayer(marker); updateStats();
+  }
+
+  async function imputeMissingGps(){
+    for (const [model, arr] of withGpsByModel){ arr.sort((a,b)=>a.ts-b.ts); }
+    function closest(modelArr, ts){ if (!modelArr || !modelArr.length) return null; let lo=0, hi=modelArr.length-1; while (lo<=hi){ const mid=(lo+hi)>>1; if (modelArr[mid].ts < ts) lo=mid+1; else hi=mid-1; } const cand=[]; if (lo < modelArr.length) cand.push(modelArr[lo]); if (lo-1 >= 0) cand.push(modelArr[lo-1]); cand.sort((a,b)=> Math.abs(a.ts-ts)-Math.abs(b.ts-ts)); return cand[0]||null; }
+    for (const it of pendingImpute){ const arr = withGpsByModel.get(it.model); const c = closest(arr, it.ts); if (c){ imputedCount++; addPhoto({file:it.file, name:it.name, date:it.date, ts:it.ts, day:it.day, lat:c.lat, lng:c.lng, artist:it.artist, model:it.model, imputed:true}); } else { ignored++; } }
+    pendingImpute.length = 0; updateStats();
+  }
+
+  // Picker
+  picker.addEventListener('change', async ()=>{ await handleFiles(picker.files); picker.value=''; });
+
+  // Filter controls
+  artistSel.addEventListener('change', ()=>{ rebuild(); refreshSelection(); });
+  modelSel.addEventListener('change',  ()=>{ rebuild(); refreshSelection(); });
+  resetFilterBtn.addEventListener('click', ()=>{ artistSel.selectedIndex=-1; modelSel.selectedIndex=-1; rebuild(); refreshSelection(); });
+
+  // Buttons
+  fitBtn.addEventListener('click', fitBoundsIfAny);
+  clearBtn.addEventListener('click', ()=>{
+    cluster.clearLayers();
+    photos.forEach(p=> URL.revokeObjectURL(p.url));
+    photos.length = 0;
+    ignored = 0; imputedCount = 0; minDay = Infinity; maxDay = -Infinity;
+    artistSet.clear(); modelSet.clear(); artistSel.innerHTML=''; modelSel.innerHTML='';
+    pendingImpute.length = 0; withGpsByModel.clear();
+    selectedMarkers.clear(); selectionBoxLayer.clearLayers(); draggingRect=false; dragRect=null; dragStartLL=null; panMode=false; lastClient=null; detailPhoto=null; hideDetail();
+    if (slider){ slider.destroy(); slider = null; sliderEl.innerHTML = ''; }
+    startInput.value=''; endInput.value=''; dateLabel.textContent = '期間: -';
+    renderThumbGrid(); updateStats();
+  });
+
+  // ページ離脱時
+  window.addEventListener('beforeunload', () => { try { photos.forEach(p=> URL.revokeObjectURL(p.url)); } catch(_){} });
+})();
+</script>
+</body>
+</html>
